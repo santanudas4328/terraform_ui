@@ -1,0 +1,81 @@
+[
+    {
+        "provider": {
+            "azurerm": {
+                "region": "ap-south-1"
+            }
+        }
+    },
+    {
+        "resource": {
+            "azurerm_storage_account": {
+                "tiger_storageacc01": {
+                    "name": "tigerstorageacc1316",
+                    "resource_group_name": "Devops-RG",
+                    "location": "eastus",
+                    "account_tier": "Standard",
+                    "account_replication_type": "LRS",
+                    "network_rules": {
+                        "default_action": "Deny"
+                    },
+                    "tags": {
+                        "created-by": "santanu.das4328@tigeranalytics.com",
+                        "created-for": "demo"
+                    },
+                    "public_network_access_enabled": "false"
+                }
+            }
+        }
+    },
+    {
+        "resource": {
+            "azurerm_service_plan": {
+                "tiger_appserviceplan01": {
+                    "name": "tiger-appserviceplan-demo",
+                    "location": "eastus",
+                    "os_type": "Linux",
+                    "resource_group_name": "Devops-RG",
+                    "sku_name": "P1v2",
+                    "tags": {
+                        "created-by": "santanu.das4328@tigeranalytics.com",
+                        "created-for": "demo"
+                    }
+                }
+            }
+        }
+    },
+    {
+        "resource": {
+            "azurerm_function_app": {
+                "tiger_functionapp01": {
+                    "name": "tiger-functionapp-1313",
+                    "resource_group_name": "Devops-RG",
+                    "location": "eastus",
+                    "app_service_plan_id": "${azurerm_service_plan.tiger_appserviceplan01.id}",
+                    "storage_account_name": "${azurerm_storage_account.tiger_storageacc01.name}",
+                    "storage_account_access_key": "${azurerm_storage_account.tiger_storageacc01.primary_access_key}",
+                    "app_settings": {
+                        "AzureWebJobsStorage": "${azurerm_storage_account.tiger_storageacc01.primary_connection_string}",
+                        "FUNCTIONS_EXTENSION_VERSION": "~4",
+                        "WEBSITES_ENABLE_APP_SERVICE_STORAGE": "false"
+                    },
+                    "auth_settings": {
+                        "enabled": "false"
+                    },
+                    "https_only": "true",
+                    "os_type": "linux",
+                    "site_config": {
+                        "always_on": "true",
+                        "http2_enabled": "true",
+                        "linux_fx_version": "python|3.9"
+                    },
+                    "version": "~4",
+                    "tags": {
+                        "created-by": "santanu.das4328@tigeranalytics.com",
+                        "created-for": "demo"
+                    }
+                }
+            }
+        }
+    }
+]
