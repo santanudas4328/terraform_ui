@@ -1,0 +1,225 @@
+trigger:
+  - none
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+
+  - stage: 'Template_Verify_Plan'
+    jobs:
+      - job: 'Template_Verify_Plan'
+        displayName: 'Template_Verify_Plan'
+        steps:
+          - script: |
+              export PROJECT=$(git log --format=%B -n 1 HEAD | tr -d " \\t\\n\\r")
+              if echo "$PROJECT" | grep -q "TNAME"
+              then
+                echo "Template found"
+                PROJECT=$(echo ${PROJECT#*TNAME})
+                echo "##vso[task.setvariable variable=ProjectName]$PROJECT"
+                exit 0
+              else
+                echo "Template Not Found. Provide TNAME followed with Template Name while commiting"
+                exit 1
+              fi
+            displayName: Verify_Template
+
+          - script: |
+              echo "##vso[task.setvariable variable=CloudName]$(cat $(Build.SourcesDirectory)/$(ProjectName)/main.tf.json | jq '.[0].provider | to_entries[0].key' | tr -d '\"')"
+            displayName: Verify_Cloud
+
+          - script: |
+              python $(Build.SourcesDirectory)/test.py
+            workingDirectory: $(Build.SourcesDirectory)/$(ProjectName)
+            displayName: Configure_Template
+
+          - task: TerraformInstaller@0
+            displayName: Install_Terraform
+            inputs:
+              terraformVersion: "latest"
+
+          - task: TerraformTaskV3@3
+            displayName: Terraform_Init
+            inputs:
+              provider: 'azurerm'
+              command: init
+              backendAzureRmResourceGroupName: 'Devops-RG'
+              backendAzureRmStorageAccountName: 'devopstrainingstorage'
+              backendAzureRmContainerName: 'ui-tfstate'
+              backendAzureRmKey: '$(ProjectName).tfstate'
+              backendServiceArm: 'devops-training'
+              workingDirectory: $(Build.SourcesDirectory)/$(ProjectName)
+
+          - task: TerraformTaskV3@3
+            displayName: Terraform_Plan
+            inputs:
+              provider: 'azurerm'
+              command: plan
+              commandOptions: "-out=tf_$(ProjectName).plan"
+              environmentServiceNameAzureRM: 'devops-training'
+              workingDirectory: $(Build.SourcesDirectory)/$(ProjectName)
+
+          - task: TerraformTaskV3@3
+            displayName: Export_Plan
+            inputs:
+              provider: 'azurerm'
+              command: show
+              commandOptions: "tf_$(ProjectName).plan"
+              outputTo: 'file'
+              outputFormat: 'json'
+              fileName: '$(Build.SourcesDirectory)/$(ProjectName)/tf_$(ProjectName).json'
+              environmentServiceNameAzureRM: 'devops-training'
+              workingDirectory: $(Build.SourcesDirectory)/$(ProjectName)
+
+          - script: |
+              ls -l $(Build.SourcesDirectory)/$(ProjectName)
+
+          - task: PublishBuildArtifacts@1
+            displayName: Publish_Tf_Plan
+            inputs:
+              PathtoPublish: '$(Build.SourcesDirectory)/$(ProjectName)/tf_$(ProjectName).plan'
+              ArtifactName: 'tf_plan'
+              publishLocation: 'Container'
+
+          - task: PublishBuildArtifacts@1
+            displayName: Publish_Tf_Plan_JSON
+            inputs:
+              PathtoPublish: '$(Build.SourcesDirectory)/$(ProjectName)/tf_$(ProjectName).json'
+              ArtifactName: 'tf_plan_json'
+              publishLocation: 'Container'
+
+
+  - stage: 'Compliance_Cost_Analysis'
+    dependsOn: 'Template_Verify_Plan'
+    condition: succeeded()
+    jobs:
+      - job: 'Compliance_Cost_Analysis'
+        displayName: 'Compliance_Cost_Analysis'
+        steps:
+          - script: |
+              export PROJECT=$(git log --format=%B -n 1 HEAD | tr -d " \\t\\n\\r")
+              PROJECT=$(echo ${PROJECT#*TNAME})
+              echo "##vso[task.setvariable variable=ProjectName]$PROJECT"
+            displayName: Load_Template_Name
+
+          - script: |
+              echo "##vso[task.setvariable variable=CloudName]$(cat $(Build.SourcesDirectory)/$(ProjectName)/main.tf.json | jq '.[0].provider | to_entries[0].key' | tr -d '\"')"
+            displayName: Load_Cloud_Name
+
+          - script: |
+              python $(Build.SourcesDirectory)/test.py
+            workingDirectory: $(Build.SourcesDirectory)/$(ProjectName)
+            displayName: Configure_Template
+
+          - task: DownloadBuildArtifacts@1
+            displayName: Download_Tf_Plan_JSON
+            inputs:
+              buildType: current
+              downloadType: specific
+              itemPattern: 'tf_plan_json/tf_$(ProjectName).json'
+              downloadPath: 'artifact'
+
+          - task: Bash@3
+            displayName: Install_Checkov
+            inputs:
+              targetType: inline
+              script: |
+                pip3 install -U checkov
+
+
+          - script: |
+              SKPCHK=$(cat $(Build.SourcesDirectory)/skip.txt | tr -d " \\t\\n\\r")
+
+              case "$SKPCHK" in
+                "")
+                  cd "$(System.DefaultWorkingDirectory)/artifact/tf_plan_json" && checkov -f tf_$(ProjectName).json -o cli -o junitxml -o json --output-file-path console,$(Build.SourcesDirectory)/Checkov-report_xml.xml,$(Build.SourcesDirectory)/Checkov-report_json.json
+                  ;;
+                *)
+                  cd "$(System.DefaultWorkingDirectory)/artifact/tf_plan_json" && checkov -f tf_$(ProjectName).json --skip-check "$SKPCHK" -o cli -o junitxml -o json --output-file-path console,$(Build.SourcesDirectory)/Checkov-report_xml.xml,$(Build.SourcesDirectory)/Checkov-report_json.json
+                  ;;
+              esac
+            displayName: Checkov_scan
+
+          - task: PublishTestResults@2
+            displayName: Publish_Scan_Results
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: 'Checkov-report_xml.xml'
+
+          - task: InfracostSetup@2
+            displayName: Install_Infracost
+            inputs:
+              apiKey: $(api_key)
+              version: '0.10.x'
+
+          - bash: |
+              infracost breakdown --path=$(System.DefaultWorkingDirectory)/artifact/tf_plan_json/tf_$(ProjectName).json
+            displayName: Generate_Cost_Estimation
+
+
+
+  - stage: 'Deploy_Infra'
+    dependsOn: Compliance_Cost_Analysis
+    condition: succeeded()
+    jobs:
+      - job: 'Deploy_Infra'
+        displayName: "Deploy_Infra"
+        steps:
+          - script: |
+              export PROJECT=$(git log --format=%B -n 1 HEAD | tr -d " \\t\\n\\r")
+              PROJECT=$(echo ${PROJECT#*TNAME})
+              echo "##vso[task.setvariable variable=ProjectName]$PROJECT"
+            displayName: Load_Template_Name
+
+          - script: |
+              echo "##vso[task.setvariable variable=CloudName]$(cat $(Build.SourcesDirectory)/$(ProjectName)/main.tf.json | jq '.[0].provider | to_entries[0].key' | tr -d '\"')"
+            displayName: Load_Cloud_Name
+
+          - script: |
+              python $(Build.SourcesDirectory)/test.py
+            workingDirectory: $(Build.SourcesDirectory)/$(ProjectName)
+            displayName: Configure_Template
+
+          - task: DownloadBuildArtifacts@1
+            inputs:
+              buildType: current
+              downloadType: specific
+              itemPattern: 'tf_plan/tf_$(ProjectName).plan'
+              downloadPath: 'artifact'
+
+          - task: TerraformInstaller@0
+            displayName: Install_Terraform
+            inputs:
+              terraformVersion: "latest"
+
+          - task: TerraformTaskV3@3
+            displayName: Terraform_Init
+            inputs:
+              provider: 'azurerm'
+              command: init
+              backendAzureRmResourceGroupName: 'Devops-RG'
+              backendAzureRmStorageAccountName: 'devopstrainingstorage'
+              backendAzureRmContainerName: 'ui-tfstate'
+              backendAzureRmKey: '$(ProjectName).tfstate'
+              backendServiceArm: 'devops-training'
+              workingDirectory: $(Build.SourcesDirectory)/$(ProjectName)
+
+          - task: TerraformTaskV3@3
+            displayName: Terraform Apply
+            inputs:
+              provider: 'azurerm'
+              command: apply
+              commandOptions: "-auto-approve -input=false $(System.DefaultWorkingDirectory)/artifact/tf_plan/tf_$(ProjectName).plan"
+              environmentServiceNameAzureRM: 'devops-training'
+              workingDirectory: $(Build.SourcesDirectory)/$(ProjectName)
+
+          - task: TerraformTaskV3@3
+            displayName: Terraform Destroy
+            inputs:
+              provider: 'azurerm'
+              command: destroy
+              commandOptions: "-auto-approve -input=false"
+              environmentServiceNameAzureRM: 'devops-training'
+              workingDirectory: $(Build.SourcesDirectory)/$(ProjectName)
